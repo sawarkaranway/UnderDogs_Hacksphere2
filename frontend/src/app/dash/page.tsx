@@ -1,8 +1,12 @@
 "use client";
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Head from 'next/head';
 import { v4 as uuidv4 } from 'uuid';
 import { DocumentIcon, ShieldLockIcon, PlusIcon, ClockIcon, CloseIcon } from '../components/Icons';
+import io from 'socket.io-client';
+
+// Initialize socket outside of the component to prevent multiple connections
+const socket = io('http://localhost:5000');
 
 // ====================== Interfaces ======================
 interface Comment {
@@ -16,10 +20,11 @@ interface Concern {
   id: string;
   date: string;
   category: string;
-  status: 'Pending' | 'Resolved'; // Only two statuses now
+  status: 'Pending' | 'Resolved' | 'Under Review';
   description: string;
   companyName: string;
-  files: File[];
+  files: any[]; // Changed from File[] for server compatibility
+  comments?: Comment[];
 }
 
 // ====================== Constants ======================
@@ -27,43 +32,15 @@ const industries = ['Ramdeobaba College', 'Police', 'Layers', 'Media House', 'Cy
 
 // ====================== Main Component ======================
 export default function DashboardPage() {
-  // ====================== State Management ======================
-  const [showNewReport, setShowNewReport] = useState(false); // Controls visibility of the new report modal
-  const [selectedIndustry, setSelectedIndustry] = useState(''); // Stores the selected industry for reporting
-  const [currentStep, setCurrentStep] = useState(1); // Tracks the current step in the new report form
-  const [selectedConcernId, setSelectedConcernId] = useState<string | null>(null); // Tracks the selected concern for details view
-  const [comments, setComments] = useState<Comment[]>([]); // Stores comments for the selected concern
-  const [newComment, setNewComment] = useState(''); // Stores the new comment input
-
-  const [concerns, setConcerns] = useState<Concern[]>([
-    { 
-      id: '#WB2837', 
-      date: '2024-02-15', 
-      category: 'Financial Fraud', 
-      status: 'Pending', 
-      description: 'Sample description of financial fraud case',
-      companyName: 'Example Corp',
-      files: [],
-    },
-    { 
-      id: '#WB1923', 
-      date: '2024-01-30', 
-      category: 'Safety Violation', 
-      status: 'Resolved',
-      description: 'Safety issues in workplace',
-      companyName: 'Construction Co.',
-      files: [],
-    },
-    { 
-      id: '#WB8845', 
-      date: '2024-03-01', 
-      category: 'Environmental Hazard', 
-      status: 'Pending',
-      description: 'Illegal waste dumping',
-      companyName: 'Waste Management Inc.',
-      files: [],
-    },
-  ]);
+  const [showNewReport, setShowNewReport] = useState(false);
+  const [selectedIndustry, setSelectedIndustry] = useState('');
+  const [currentStep, setCurrentStep] = useState(1);
+  const [selectedConcernId, setSelectedConcernId] = useState<string | null>(null);
+  const [comments, setComments] = useState<Comment[]>([]);
+  const [newComment, setNewComment] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [concerns, setConcerns] = useState<Concern[]>([]);
 
   const [newReport, setNewReport] = useState({
     title: '',
@@ -74,51 +51,196 @@ export default function DashboardPage() {
 
   const selectedConcern = concerns.find(c => c.id === selectedConcernId); // Finds the selected concern for details view
 
-  // ====================== New Report Feature ======================
+  // Fetch concerns from the API
+  useEffect(() => {
+    const fetchConcerns = async () => {
+      try {
+        setLoading(true);
+        console.log('Fetching concerns from API...');
+        const response = await fetch('http://localhost:5000/api/concerns');
+        
+        if (!response.ok) {
+          throw new Error(`Server responded with status: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        console.log('Concerns fetched:', data);
+        setConcerns(data);
+        setError(null);
+      } catch (error) {
+        console.error('Error fetching concerns:', error);
+        setError('Failed to connect to the server. Please make sure the backend is running.');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchConcerns();
+  }, []);
+
+  // Handle socket connections
+  useEffect(() => {
+    // Setup socket connection
+    console.log('Setting up socket connection...');
+    
+    socket.on('connect', () => {
+      console.log('Socket connected with ID:', socket.id);
+    });
+    
+    socket.on('connect_error', (err) => {
+      console.error('Socket connection error:', err);
+      setError('Failed to establish WebSocket connection.');
+    });
+
+    // Cleanup on unmount
+    return () => {
+      console.log('Cleaning up socket connection...');
+      socket.off('connect');
+      socket.off('connect_error');
+    };
+  }, []);
+
+  // Handle WebSocket messages
+  useEffect(() => {
+    if (!socket) return;
+
+    const handleReceiveMessage = (data: Comment) => {
+      console.log('Received message:', data);
+
+      // Ensure the message is unique before adding it to the state
+      setComments((prevComments) => {
+        const isDuplicate = prevComments.some((comment) => comment.id === data.id);
+        if (!isDuplicate) {
+          return [...prevComments, data];
+        }
+        return prevComments;
+      });
+    };
+
+    // Set up the event listener
+    socket.on('receive_message', handleReceiveMessage);
+
+    // Clean up the event listener on unmount
+    return () => {
+      socket.off('receive_message', handleReceiveMessage);
+    };
+  }, [socket]);
+
+  // Join room and listen for messages when a concern is selected
+  useEffect(() => {
+    if (selectedConcernId) {
+      console.log('Joining room for concern:', selectedConcernId);
+      
+      // Join the room for the selected concern
+      socket.emit('join_room', { concernId: selectedConcernId });
+    }
+  }, [selectedConcernId]);
+
+  // Handle selecting a concern
+  const handleSelectConcern = (id: string) => {
+    setSelectedConcernId(id);
+    
+    // Reset comments when selecting a new concern
+    const concern = concerns.find(c => c.id === id);
+    const uniqueComments = concern?.comments.filter(
+      (comment, index, self) => index === self.findIndex((c) => c.id === comment.id)
+    );
+    setComments(uniqueComments || []);    
+    console.log('Selected concern:', id);
+  };
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    setNewReport(prev => ({ ...prev, files: [...prev.files, ...files] }));
+    setNewReport((prev) => ({ ...prev, files: [...prev.files, ...files] }));
   };
 
-  const handleSubmitReport = () => {
-    const newConcern: Concern = {
-      id: `#WB${uuidv4().substr(0, 4).toUpperCase()}`,
-      date: new Date().toISOString().split('T')[0],
-      category: newReport.title,
-      status: 'Pending', // Default status for new reports
-      description: newReport.description,
-      companyName: newReport.companyName,
-      files: newReport.files,
-    };
-    
-    setConcerns([...concerns, newConcern]); // Add new concern to the list
-    setShowNewReport(false); // Close the modal
-    setCurrentStep(1); // Reset the form step
-    setSelectedIndustry(''); // Reset the selected industry
-    setNewReport({ title: '', description: '', companyName: '', files: [] }); // Reset the form
-  };
+  const handleSubmitReport = async () => {
+    try {
+      setLoading(true);
+      const newConcern = {
+        title: newReport.title,
+        description: newReport.description,
+        companyName: newReport.companyName,
+        files: [], // Handle file uploads separately in a production app
+      };
 
-  // ====================== Comments Feature ======================
-  const handleAddComment = () => {
-    if (newComment.trim()) {
-      setComments(prev => [...prev, {
-        id: uuidv4(),
-        text: newComment,
-        author: 'reporter',
-        timestamp: new Date().toLocaleString()
-      }]);
-      setNewComment(''); // Clear the input after adding a comment
+      console.log('Submitting new report:', newConcern);
+      const response = await fetch('http://localhost:5000/api/concerns', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(newConcern),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log('Report submitted successfully:', data);
+        setConcerns((prev) => [...prev, data]);
+        setShowNewReport(false);
+        setCurrentStep(1);
+        setSelectedIndustry('');
+        setNewReport({ title: '', description: '', companyName: '', files: [] });
+        setError(null);
+      } else {
+        throw new Error(`Server responded with status: ${response.status}`);
+      }
+    } catch (error) {
+      console.error('Error submitting report:', error);
+      setError('Failed to submit report. Please try again.');
+    } finally {
+      setLoading(false);
     }
   };
 
-  // ====================== Status Update Feature ======================
-  const updateStatus = (newStatus: 'Pending' | 'Resolved') => {
-    setConcerns(prev => prev.map(concern => 
-      concern.id === selectedConcernId ? { ...concern, status: newStatus } : concern
-    ));
+const handleAddComment = () => {
+  if (newComment.trim() && selectedConcernId) {
+    // Emit to backend
+    socket.emit('send_message', {
+      concernId: selectedConcernId,
+      message: newComment,
+      sender: 'reporter',
+    });
+
+    // Clear input field
+    setNewComment('');
+  }
+};
+
+  const updateStatus = async (newStatus: 'Pending' | 'Resolved' | 'Under Review') => {
+    if (!selectedConcernId) return;
+
+    try {
+      setLoading(true);
+      console.log('Updating status to:', newStatus);
+      const response = await fetch(`http://localhost:5000/api/concerns/${selectedConcernId}/status`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ status: newStatus }),
+      });
+
+      if (response.ok) {
+        const updatedConcern = await response.json();
+        setConcerns((prev) =>
+          prev.map((concern) =>
+            concern.id === selectedConcernId ? { ...concern, status: updatedConcern.status } : concern
+          )
+        );
+        setError(null);
+      } else {
+        throw new Error(`Server responded with status: ${response.status}`);
+      }
+    } catch (error) {
+      console.error('Error updating status:', error);
+      setError('Failed to update status. Please try again.');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  // ====================== Concern Details Modal ======================
+// ====================== Concern Details Modal ======================
   const renderDetailsModal = () => (
     <div className="fixed inset-0 bg-black bg-opacity-75 backdrop-blur-sm flex items-center justify-center p-4 z-50">
       <div className="bg-gray-900 rounded-xl w-full max-w-4xl p-6 relative border border-gray-800 max-h-[90vh] overflow-y-auto">
@@ -201,15 +323,17 @@ export default function DashboardPage() {
           {/* Comments List */}
           <div className="space-y-4 mb-6">
             {comments.map(comment => (
-              <div key={comment.id} className={`p-4 rounded-lg ${comment.author === 'reporter' ? 'bg-gray-800 ml-4' : 'bg-gray-700 mr-4'}`}>
-                <div className="flex justify-between mb-2">
-                  <span className="text-sm text-pink-400">{comment.author}</span>
-                  <span className="text-xs text-gray-500">{comment.timestamp}</span>
-                </div>
-                <p className="text-gray-300">{comment.text}</p>
-              </div>
-            ))}
-          </div>
+  <div 
+    key={comment.id}  // Use the unique ID from the backend or optimistic update
+    className={`p-4 rounded-lg ${comment.author === 'reporter' ? 'bg-gray-800 ml-4' : 'bg-gray-700 mr-4'}`}
+  >
+    <div className="flex justify-between mb-2">
+      <span className="text-sm text-pink-400">{comment.author}</span>
+      <span className="text-xs text-gray-500">{comment.timestamp}</span>
+    </div>
+    <p className="text-gray-300">{comment.text}</p>
+  </div>
+))}          </div>
 
           {/* Add Comment */}
           <div className="flex gap-4">
@@ -417,34 +541,31 @@ export default function DashboardPage() {
                   <th className="px-6 py-4 text-left text-sm font-medium text-gray-400">Actions</th>
                 </tr>
               </thead>
-              <tbody>
-                {concerns.map((concern) => (
-                  <tr key={concern.id} className="border-b border-gray-700 hover:bg-gray-850 transition-colors">
-                    <td className="px-6 py-4 font-mono text-pink-400">{concern.id}</td>
-                    <td className="px-6 py-4">{concern.date}</td>
-                    <td className="px-6 py-4">{concern.category}</td>
-                    <td className="px-6 py-4">
-                      <span className={`px-3 py-1 rounded-full text-sm ${
-                        concern.status === 'Resolved' ? 'bg-green-900 text-green-300' :
-                        'bg-rose-600 text-white'
-                      }`}>
-                        {concern.status}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 space-x-4">
-                      <button 
-                        onClick={() => setSelectedConcernId(concern.id)}
-                        className="text-pink-400 hover:text-pink-300"
-                      >
-                        View Details
-                      </button>
-                      <button className="text-gray-400 hover:text-gray-300">
-                        Download Receipt
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
+              <tbody>{concerns.map((concern, index) => (<tr key={`${concern.id}-${index}`} className="border-b border-gray-700 hover:bg-gray-850 transition-colors">
+    <td className="px-6 py-4 font-mono text-pink-400">{concern.id}</td>
+    <td className="px-6 py-4">{concern.date}</td>
+    <td className="px-6 py-4">{concern.category}</td>
+    <td className="px-6 py-4">
+      <span className={`px-3 py-1 rounded-full text-sm ${
+        concern.status === 'Resolved' ? 'bg-green-900 text-green-300' :
+        'bg-rose-600 text-white'
+      }`}>
+        {concern.status}
+      </span>
+    </td>
+    <td className="px-6 py-4 space-x-4">
+      <button 
+        onClick={() => setSelectedConcernId(concern.id)}
+        className="text-pink-400 hover:text-pink-300"
+      >
+        View Details
+      </button>
+      <button className="text-gray-400 hover:text-gray-300">
+        Download Receipt
+      </button>
+    </td>
+  </tr>
+))}              </tbody>
             </table>
           </div>
         </div>
